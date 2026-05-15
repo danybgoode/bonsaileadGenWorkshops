@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Leadseek</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">B2B Lead Generation</p>
+          <h1>Find senior product teams showing buying intent.</h1>
+          <p class="hero-copy">
+            Search live product leadership roles, diagnose the hidden product
+            dysfunction, and export workshop-ready leads in one flow.
+          </p>
+        </div>
+        <div class="status-card">
+          <span>Pipeline</span>
+          <strong>Jobs → Diagnosis → CSV → Sheets</strong>
+        </div>
+      </section>
+
+      <section class="control-panel">
+        <div class="field-group">
+          <label for="roles">Target roles</label>
+          <div class="chip-input" id="rolesChips"></div>
+          <input
+            id="roles"
+            type="text"
+            value="VP Product, Head of Product"
+            autocomplete="off"
+          />
+        </div>
+
+        <div class="field-group">
+          <label for="locations">Locations</label>
+          <div class="chip-input" id="locationsChips"></div>
+          <input
+            id="locations"
+            type="text"
+            value="US, Canada, Mexico"
+            autocomplete="off"
+          />
+        </div>
+
+        <div class="control-row">
+          <label class="limit-control" for="limit">
+            <span>Lead limit</span>
+            <input id="limit" type="number" min="1" max="25" value="10" />
+          </label>
+          <label class="model-control" for="model">
+            <span>Gemini model</span>
+            <select id="model">
+              <option value="">Use .env default</option>
+              <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+              <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+              <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="actions">
+          <button id="runButton" class="button primary" type="button">
+            Run lead search
+          </button>
+          <button id="csvButton" class="button" type="button" disabled>
+            Download CSV
+          </button>
+          <button id="sheetsButton" class="button" type="button" disabled>
+            Export to Google Sheets
+          </button>
+        </div>
+        <p id="message" class="message" role="status"></p>
+      </section>
+
+      <section class="results-panel">
+        <div class="results-heading">
+          <div>
+            <p class="eyebrow">Results</p>
+            <h2 id="resultsTitle">No run yet</h2>
+          </div>
+          <div class="summary-grid" aria-label="Run summary">
+            <div><span id="totalCount">0</span><small>Total</small></div>
+            <div><span id="successCount">0</span><small>Ready</small></div>
+            <div><span id="failedCount">0</span><small>Skipped</small></div>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Company</th>
+                <th>Role</th>
+                <th>Country</th>
+                <th>Illness</th>
+                <th>Workshop</th>
+                <th>Pitch angle</th>
+              </tr>
+            </thead>
+            <tbody id="resultsBody">
+              <tr>
+                <td colspan="6" class="empty">
+                  Run a search to generate your first lead set.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

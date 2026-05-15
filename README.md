@@ -1,0 +1,137 @@
+# Leadseek
+
+A modular Python CLI for fetching live product-management job postings and
+turning them into structured outbound consulting leads.
+
+## Project Structure
+
+```text
+.
+├── main.py
+├── requirements.txt
+├── .env.example
+└── leadseek/
+    ├── config.py
+    ├── diagnostics.py
+    ├── ingestion.py
+    ├── models.py
+    ├── output.py
+    ├── pipeline.py
+    └── prompts.py
+```
+
+## Setup
+
+1. Create a Gemini API key in Google AI Studio.
+2. Create a SerpApi API key for Google Jobs search.
+3. Create and activate a virtual environment.
+4. Install dependencies.
+5. Copy `.env.example` to `.env` and set both API keys.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+cp .env.example .env
+```
+
+## Usage
+
+Fetch live jobs by role and location, diagnose them with Gemini, and append CSV
+rows:
+
+```bash
+python main.py process-leads \
+  --roles "VP Product, Head of Product" \
+  --locations "US, Canada, Mexico" \
+  --output leads.csv
+```
+
+Optional flags:
+
+```bash
+python main.py process-leads \
+  --roles "VP Product, Head of Product" \
+  --locations "US, Canada, Mexico" \
+  --output leads.csv \
+  --model gemini-2.5-flash \
+  --limit 5 \
+  --fail-fast
+```
+
+## Web UI
+
+Run the local web interface:
+
+```bash
+uvicorn app:app --reload
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8000
+```
+
+The UI lets you set roles, locations, lead limit, and model, then preview the
+results, download CSV, or export the current result set to a new Google Sheet.
+
+## Google Sheets Export
+
+Sheets export is optional. Create a Google Cloud service account with Google
+Sheets and Drive API access, then set one of these environment variables:
+
+```bash
+GOOGLE_SERVICE_ACCOUNT_JSON='{"type":"service_account", ... }'
+```
+
+or, easier for hosted deploys:
+
+```bash
+GOOGLE_SERVICE_ACCOUNT_JSON_B64=base64_encoded_service_account_json
+```
+
+If you want each created sheet shared back to your normal Google account, set:
+
+```bash
+GOOGLE_SHEETS_SHARE_WITH=you@example.com
+```
+
+## Vercel Deploy
+
+This project includes `app.py`, `requirements.txt`, `.python-version`, and
+`vercel.json` for a FastAPI deployment on Vercel.
+
+Set these Vercel environment variables:
+
+```bash
+GEMINI_API_KEY=...
+GEMINI_MODEL=gemini-2.5-flash
+SERPAPI_API_KEY=...
+GOOGLE_SERVICE_ACCOUNT_JSON_B64=...
+GOOGLE_SHEETS_SHARE_WITH=you@example.com
+```
+
+Small runs are the right fit for Vercel serverless execution. Keep `--limit` or
+the UI lead limit around 5-10 for responsive mobile use.
+
+## Swapping Adapters
+
+- Replace SerpApi ingestion by changing `fetch_live_jobs` or adding another
+  function that yields `JobPosting` objects in `leadseek/ingestion.py`.
+- Replace CSV persistence by changing only `save_leads` in
+  `leadseek/output.py`. The rest of the pipeline passes validated
+  `LeadRecord` objects into that function.
+
+## Output CSV Columns
+
+- `source`
+- `job_url`
+- `job_description_text`
+- `country`
+- `company_name`
+- `job_title`
+- `core_illness`
+- `workshop_pitch`
+- `pitch_angle`
+- `processed_at_utc`
