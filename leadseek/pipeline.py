@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -17,6 +18,9 @@ from leadseek.text_cleaning import prepare_job_description_for_gemini
 
 class PipelineRunError(RuntimeError):
     """Raised when the pipeline cannot start or persist results."""
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -54,6 +58,13 @@ def generate_leads(
 
     fetch_limit = limit or 10
     os.environ.setdefault("SERPAPI_API_KEY", config.serpapi_api_key)
+    logger.info(
+        "Lead generation started roles=%s locations=%s limit=%s fail_fast=%s",
+        roles,
+        locations,
+        fetch_limit,
+        fail_fast,
+    )
 
     try:
         postings = iter_live_job_postings(
@@ -73,6 +84,13 @@ def generate_leads(
     ) as diagnostician:
         for posting in postings:
             try:
+                logger.info(
+                    "Diagnosing posting company=%r title=%r country=%r url=%s",
+                    posting.company_name,
+                    posting.job_title,
+                    posting.country,
+                    posting.job_url,
+                )
                 gemini_input = prepare_job_description_for_gemini(
                     posting.job_description_text
                 )
@@ -87,15 +105,27 @@ def generate_leads(
                         processed_at_utc=datetime.now(UTC).isoformat(),
                     )
                 )
+                logger.info(
+                    "Diagnosis succeeded company=%r title=%r",
+                    posting.company_name,
+                    posting.job_title,
+                )
             except DiagnosisError as exc:
                 failure = ProcessingFailure(
                     job_url=posting.job_url,
                     error=str(exc),
                 )
                 failures.append(failure)
+                logger.warning("Diagnosis failed url=%s error=%s", posting.job_url, exc)
                 if fail_fast:
                     break
 
+    logger.info(
+        "Lead generation finished total=%s succeeded=%s failed=%s",
+        len(postings),
+        len(records),
+        len(failures),
+    )
     return PipelineResult(
         records=records,
         summary=ProcessSummary(

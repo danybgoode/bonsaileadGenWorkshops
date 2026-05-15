@@ -73,8 +73,14 @@ Then open:
 http://127.0.0.1:8000
 ```
 
-The UI lets you set roles, locations, lead limit, and model, then preview the
-results, download CSV, or export the current result set to a new Google Sheet.
+The UI lets you set roles, locations, and lead limit, then preview the results,
+download CSV, or export the current result set to a new Google Sheet.
+The Gemini model is read from `GEMINI_MODEL`; the UI intentionally does not
+override it.
+
+Searches are balanced across selected role/location pairs. For example, a run
+with two roles, three countries, and a limit of 10 will take one result from
+each pair before paging deeper into any single country.
 
 ## Google Sheets Export
 

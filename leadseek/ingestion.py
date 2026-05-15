@@ -8,18 +8,31 @@ touching Gemini diagnosis or output persistence.
 
 from __future__ import annotations
 
+import logging
 import os
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 import requests
 from pydantic import ValidationError
 
 from leadseek.models import JobPosting
+from leadseek.search_options import MAX_LOCATIONS, MAX_ROLES, normalize_search_terms
 
 
 SERPAPI_SEARCH_URL = "https://serpapi.com/search.json"
 DEFAULT_TIMEOUT_SECONDS = 30
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class QueryState:
+    role: str
+    location: str
+    next_page_token: str | None = None
+    exhausted: bool = False
+    buffer: list[tuple[str, JobPosting]] = field(default_factory=list)
 
 
 class IngestionError(RuntimeError):
@@ -43,8 +56,20 @@ def fetch_live_jobs(roles: list, locations: list, limit: int = 10) -> list[dict]
         or no usable job descriptions found.
     """
 
-    normalized_roles = _normalize_terms(roles, "roles")
-    normalized_locations = _normalize_terms(locations, "locations")
+    try:
+        normalized_roles = normalize_search_terms(
+            roles,
+            label="roles",
+            max_items=MAX_ROLES,
+        )
+        normalized_locations = normalize_search_terms(
+            locations,
+            label="locations",
+            max_items=MAX_LOCATIONS,
+        )
+    except ValueError as exc:
+        raise IngestionError(str(exc)) from exc
+
     if limit < 1:
         raise IngestionError("limit must be greater than zero.")
 
@@ -54,51 +79,79 @@ def fetch_live_jobs(roles: list, locations: list, limit: int = 10) -> list[dict]
 
     postings: list[JobPosting] = []
     seen_keys: set[str] = set()
+    query_errors: list[str] = []
+    states = [
+        QueryState(role=role, location=location)
+        for role in normalized_roles
+        for location in normalized_locations
+    ]
 
-    for role in normalized_roles:
-        for location in normalized_locations:
-            next_page_token: str | None = None
+    logger.info(
+        "Starting SerpApi Google Jobs fetch roles=%s locations=%s limit=%s query_pairs=%s",
+        normalized_roles,
+        normalized_locations,
+        limit,
+        len(states),
+    )
 
-            while len(postings) < limit:
-                payload = _fetch_google_jobs_page(
-                    api_key=api_key,
-                    role=role,
-                    location=location,
-                    next_page_token=next_page_token,
+    while len(postings) < limit and any(not state.exhausted for state in states):
+        added_this_round = 0
+        for state in states:
+            if state.exhausted or len(postings) >= limit:
+                continue
+
+            if not state.buffer:
+                try:
+                    _fill_query_buffer(
+                        state=state,
+                        api_key=api_key,
+                    )
+                except IngestionError as exc:
+                    state.exhausted = True
+                    message = f"{state.role} in {state.location}: {exc}"
+                    query_errors.append(message)
+                    logger.warning("Skipping failed search query: %s", message)
+                    continue
+
+            added_posting = _drain_one_buffered_posting(
+                state=state,
+                postings=postings,
+                seen_keys=seen_keys,
+                limit=limit,
+            )
+
+            if added_posting:
+                added_this_round += 1
+                logger.info(
+                    "Added posting role=%r location=%r total=%s buffer_remaining=%s",
+                    state.role,
+                    state.location,
+                    len(postings),
+                    len(state.buffer),
                 )
 
-                for result in payload.get("jobs_results", []):
-                    posting = _normalize_serpapi_job(result, location=location)
-                    if posting is None:
-                        continue
+            # Keep provider calls polite when paging through multiple query pairs.
+            if not state.buffer and not state.exhausted:
+                time.sleep(0.15)
 
-                    dedupe_key = _dedupe_key(result, posting)
-                    if dedupe_key in seen_keys:
-                        continue
-
-                    seen_keys.add(dedupe_key)
-                    postings.append(posting)
-                    if len(postings) >= limit:
-                        break
-
-                if len(postings) >= limit:
-                    break
-
-                next_page_token = (
-                    payload.get("serpapi_pagination", {}) or {}
-                ).get("next_page_token")
-                if not next_page_token:
-                    break
-
-                # Keep provider calls polite when paging through multiple query pairs.
-                time.sleep(0.25)
+        if added_this_round == 0 and all(state.exhausted for state in states):
+            break
 
     if not postings:
+        if query_errors:
+            raise IngestionError(
+                "No usable jobs were returned. Query errors: "
+                + " | ".join(query_errors[:5])
+            )
         raise IngestionError(
             "No job postings with non-empty descriptions were returned for the "
             "requested roles and locations."
         )
 
+    if query_errors:
+        logger.warning("Completed with partial query errors: %s", query_errors[:5])
+
+    logger.info("Completed SerpApi fetch usable_jobs=%s", len(postings))
     return [_posting_to_public_dict(posting) for posting in postings]
 
 
@@ -178,6 +231,57 @@ def _fetch_google_jobs_page(
     return payload
 
 
+def _fill_query_buffer(*, state: QueryState, api_key: str) -> None:
+    payload = _fetch_google_jobs_page(
+        api_key=api_key,
+        role=state.role,
+        location=state.location,
+        next_page_token=state.next_page_token,
+    )
+
+    for result in payload.get("jobs_results", []):
+        posting = _normalize_serpapi_job(result, location=state.location)
+        if posting is None:
+            continue
+        state.buffer.append((_dedupe_key(result, posting), posting))
+
+    state.next_page_token = (
+        payload.get("serpapi_pagination", {}) or {}
+    ).get("next_page_token")
+    if not state.next_page_token and not state.buffer:
+        state.exhausted = True
+
+    logger.info(
+        "Fetched query page role=%r location=%r buffered=%s has_next=%s",
+        state.role,
+        state.location,
+        len(state.buffer),
+        bool(state.next_page_token),
+    )
+
+
+def _drain_one_buffered_posting(
+    *,
+    state: QueryState,
+    postings: list[JobPosting],
+    seen_keys: set[str],
+    limit: int,
+) -> bool:
+    while state.buffer and len(postings) < limit:
+        dedupe_key, posting = state.buffer.pop(0)
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+        postings.append(posting)
+        if not state.buffer and not state.next_page_token:
+            state.exhausted = True
+        return True
+
+    if not state.buffer and not state.next_page_token:
+        state.exhausted = True
+    return False
+
+
 def _normalize_serpapi_job(
     result: dict[str, Any],
     *,
@@ -237,13 +341,6 @@ def _dedupe_key(result: dict[str, Any], posting: JobPosting) -> str:
         f"url:{posting.job_url}|title:{posting.job_title}|"
         f"company:{posting.company_name}"
     )
-
-
-def _normalize_terms(values: list, label: str) -> list[str]:
-    normalized = [str(value).strip() for value in values if str(value).strip()]
-    if not normalized:
-        raise IngestionError(f"At least one {label} value is required.")
-    return normalized
 
 
 def _clean_text(value: Any) -> str:
