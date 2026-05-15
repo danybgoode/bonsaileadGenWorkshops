@@ -2,24 +2,21 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, Field
 
 from leadseek.config import AppConfig, ConfigError
 from leadseek.output import CSV_HEADERS, records_to_csv_text
 from leadseek.pipeline import PipelineRunError, generate_leads
 from leadseek.sheets import SheetsExportError, export_rows_to_google_sheets
+from leadseek.web_assets import APP_JS, INDEX_HTML, STYLES_CSS
 
 
 load_dotenv()
-
-ROOT_DIR = Path(__file__).parent
-PUBLIC_DIR = ROOT_DIR / "public"
 
 app = FastAPI(title="Leadseek")
 
@@ -36,18 +33,18 @@ class ExportSheetsRequest(BaseModel):
 
 
 @app.get("/")
-def index() -> FileResponse:
-    return FileResponse(PUBLIC_DIR / "index.html")
+def index() -> HTMLResponse:
+    return HTMLResponse(INDEX_HTML)
 
 
 @app.get("/styles.css", include_in_schema=False)
-def styles() -> FileResponse:
-    return FileResponse(PUBLIC_DIR / "styles.css")
+def styles() -> Response:
+    return Response(STYLES_CSS, media_type="text/css")
 
 
 @app.get("/app.js", include_in_schema=False)
-def frontend_script() -> FileResponse:
-    return FileResponse(PUBLIC_DIR / "app.js")
+def frontend_script() -> Response:
+    return Response(APP_JS, media_type="application/javascript")
 
 
 @app.get("/api/health")
