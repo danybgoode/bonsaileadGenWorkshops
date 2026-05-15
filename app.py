@@ -12,8 +12,15 @@ from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, Field
 
 from leadseek.config import AppConfig, ConfigError
+from leadseek.ingestion import IngestionError, fetch_serpapi_account_usage
+from leadseek.models import JobPosting
 from leadseek.output import CSV_HEADERS, records_to_csv_text
-from leadseek.pipeline import PipelineRunError, generate_leads
+from leadseek.pipeline import (
+    PipelineRunError,
+    enrich_posting,
+    fetch_job_candidates,
+    generate_leads,
+)
 from leadseek.sheets import SheetsExportError, export_rows_to_google_sheets
 from leadseek.search_options import (
     LOCATION_PRESETS,
@@ -40,6 +47,10 @@ class RunLeadsRequest(BaseModel):
     roles: list[str] = Field(min_length=1)
     locations: list[str] = Field(min_length=1)
     limit: int = Field(default=10, ge=1, le=MAX_LIMIT)
+
+
+class EnrichLeadRequest(BaseModel):
+    job: dict[str, Any]
 
 
 class ExportSheetsRequest(BaseModel):
@@ -77,22 +88,114 @@ def options() -> dict[str, Any]:
     }
 
 
+@app.get("/api/serpapi-usage")
+def serpapi_usage() -> dict[str, Any]:
+    try:
+        usage = fetch_serpapi_account_usage()
+    except IngestionError as exc:
+        logger.warning("SerpApi usage lookup failed: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail={"message": str(exc), "run_id": "usage"},
+        ) from exc
+    return {"usage": usage}
+
+
+def _validated_search_inputs(request: RunLeadsRequest) -> tuple[list[str], list[str]]:
+    roles = normalize_search_terms(
+        request.roles,
+        label="roles",
+        max_items=MAX_ROLES,
+    )
+    locations = normalize_search_terms(
+        request.locations,
+        label="locations",
+        max_items=MAX_LOCATIONS,
+    )
+    return roles, locations
+
+
+@app.post("/api/fetch-jobs")
+def fetch_jobs(request: RunLeadsRequest) -> dict[str, Any]:
+    run_id = uuid.uuid4().hex[:10]
+    try:
+        roles, locations = _validated_search_inputs(request)
+        logger.info(
+            "UI fetch requested run_id=%s roles=%s locations=%s limit=%s",
+            run_id,
+            roles,
+            locations,
+            request.limit,
+        )
+        config = AppConfig.from_env()
+        result = fetch_job_candidates(
+            roles=roles,
+            locations=locations,
+            config=config,
+            limit=request.limit,
+        )
+    except (ConfigError, PipelineRunError) as exc:
+        logger.exception("UI fetch failed run_id=%s error=%s", run_id, exc)
+        raise HTTPException(
+            status_code=400,
+            detail={"message": str(exc), "run_id": run_id},
+        ) from exc
+    except ValueError as exc:
+        logger.warning("UI validation failed run_id=%s error=%s", run_id, exc)
+        raise HTTPException(
+            status_code=422,
+            detail={"message": str(exc), "run_id": run_id},
+        ) from exc
+
+    jobs = [posting.model_dump(mode="json") for posting in result.postings]
+    logger.info(
+        "UI fetch completed run_id=%s jobs=%s serpapi_searches_used=%s",
+        run_id,
+        len(jobs),
+        result.stats.serpapi_searches_used,
+    )
+    return {
+        "run_id": run_id,
+        "jobs": jobs,
+        "summary": {
+            "jobs": len(jobs),
+            "serpapi_searches_used": result.stats.serpapi_searches_used,
+            "query_errors": result.stats.query_errors,
+        },
+    }
+
+
+@app.post("/api/enrich-lead")
+def enrich_lead(request: EnrichLeadRequest) -> dict[str, Any]:
+    run_id = uuid.uuid4().hex[:10]
+    try:
+        config = AppConfig.from_env()
+        posting = JobPosting.model_validate(request.job)
+        logger.info(
+            "UI enrichment requested run_id=%s company=%r title=%r",
+            run_id,
+            posting.company_name,
+            posting.job_title,
+        )
+        record = enrich_posting(posting=posting, config=config)
+    except (ConfigError, PipelineRunError, ValueError) as exc:
+        logger.exception("UI enrichment failed run_id=%s error=%s", run_id, exc)
+        raise HTTPException(
+            status_code=400,
+            detail={"message": str(exc), "run_id": run_id},
+        ) from exc
+
+    logger.info("UI enrichment completed run_id=%s", run_id)
+    return {"run_id": run_id, "record": record.model_dump(mode="json")}
+
+
 @app.post("/api/run")
 def run_leads(request: RunLeadsRequest) -> dict[str, Any]:
     run_id = uuid.uuid4().hex[:10]
     try:
-        roles = normalize_search_terms(
-            request.roles,
-            label="roles",
-            max_items=MAX_ROLES,
-        )
-        locations = normalize_search_terms(
-            request.locations,
-            label="locations",
-            max_items=MAX_LOCATIONS,
-        )
+        roles, locations = _validated_search_inputs(request)
         logger.info(
-            "UI run requested run_id=%s roles=%s locations=%s limit=%s",
+            "Legacy UI run requested run_id=%s roles=%s locations=%s limit=%s",
             run_id,
             roles,
             locations,
@@ -107,13 +210,13 @@ def run_leads(request: RunLeadsRequest) -> dict[str, Any]:
             fail_fast=False,
         )
     except (ConfigError, PipelineRunError) as exc:
-        logger.exception("UI run failed run_id=%s error=%s", run_id, exc)
+        logger.exception("Legacy UI run failed run_id=%s error=%s", run_id, exc)
         raise HTTPException(
             status_code=400,
             detail={"message": str(exc), "run_id": run_id},
         ) from exc
     except ValueError as exc:
-        logger.warning("UI validation failed run_id=%s error=%s", run_id, exc)
+        logger.warning("Legacy UI validation failed run_id=%s error=%s", run_id, exc)
         raise HTTPException(
             status_code=422,
             detail={"message": str(exc), "run_id": run_id},

@@ -73,8 +73,9 @@ Then open:
 http://127.0.0.1:8000
 ```
 
-The UI lets you set roles, locations, and lead limit, then preview the results,
-download CSV, or export the current result set to a new Google Sheet.
+The UI lets you set roles, locations, and lead limit, then fetch candidate jobs,
+select the best-fit leads, enrich only those leads with Gemini, download CSV, or
+export the enriched result set to a new Google Sheet.
 The Gemini model is read from `GEMINI_MODEL`; the UI intentionally does not
 override it.
 
@@ -120,6 +121,24 @@ GOOGLE_SHEETS_SHARE_WITH=you@example.com
 
 Small runs are the right fit for Vercel serverless execution. Keep `--limit` or
 the UI lead limit around 5-10 for responsive mobile use.
+
+## Service Context For Gemini
+
+Gemini enrichment can use a richer consulting reference context. The app checks
+these sources in order:
+
+```bash
+SERVICE_CONTEXT_TEXT="Your services, frameworks, proof points, and operating stack..."
+```
+
+or:
+
+```bash
+NOTION_TOKEN=secret_...
+NOTION_PAGE_ID=...
+```
+
+If neither is set, the app uses the built-in default service context.
 
 ## Swapping Adapters
 

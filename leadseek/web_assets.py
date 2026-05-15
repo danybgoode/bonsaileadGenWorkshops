@@ -22,6 +22,7 @@ INDEX_HTML = """<!doctype html>
         <div class="status-card">
           <span>Pipeline</span>
           <strong>Jobs -> Diagnosis -> CSV -> Sheets</strong>
+          <small id="usageStatus">Checking SerpApi usage...</small>
         </div>
       </section>
 
@@ -73,7 +74,8 @@ INDEX_HTML = """<!doctype html>
         </div>
 
         <div class="actions">
-          <button id="runButton" class="button primary" type="button">Run lead search</button>
+          <button id="runButton" class="button primary" type="button">Fetch jobs</button>
+          <button id="enrichButton" class="button" type="button" disabled>Enrich selected</button>
           <button id="csvButton" class="button" type="button" disabled>Download CSV</button>
           <button id="sheetsButton" class="button" type="button" disabled>Export to Google Sheets</button>
         </div>
@@ -97,9 +99,11 @@ INDEX_HTML = """<!doctype html>
           <table>
             <thead>
               <tr>
+                <th>Select</th>
                 <th>Company</th>
                 <th>Role</th>
                 <th>Country</th>
+                <th>Status</th>
                 <th>Illness</th>
                 <th>Workshop</th>
                 <th>Pitch angle</th>
@@ -107,7 +111,7 @@ INDEX_HTML = """<!doctype html>
             </thead>
             <tbody id="resultsBody">
               <tr>
-                <td colspan="6" class="empty">Run a search to generate your first lead set.</td>
+                <td colspan="8" class="empty">Fetch jobs to generate your first lead set.</td>
               </tr>
             </tbody>
           </table>
@@ -364,6 +368,7 @@ const addRoleButton = document.querySelector("#addRoleButton");
 const addLocationButton = document.querySelector("#addLocationButton");
 const limitInput = document.querySelector("#limit");
 const runButton = document.querySelector("#runButton");
+const enrichButton = document.querySelector("#enrichButton");
 const csvButton = document.querySelector("#csvButton");
 const sheetsButton = document.querySelector("#sheetsButton");
 const message = document.querySelector("#message");
@@ -372,27 +377,16 @@ const totalCount = document.querySelector("#totalCount");
 const successCount = document.querySelector("#successCount");
 const failedCount = document.querySelector("#failedCount");
 const resultsBody = document.querySelector("#resultsBody");
+const usageStatus = document.querySelector("#usageStatus");
 
-const ROLE_PRESETS = [
-  "VP Product",
-  "Head of Product",
-  "Chief Product Officer",
-  "Director of Product",
-  "Group Product Manager",
-  "Product Operations Lead",
-];
-const LOCATION_PRESETS = [
-  "United States",
-  "Canada",
-  "Mexico",
-  "United Kingdom",
-  "Germany",
-  "Spain",
-];
+const ROLE_PRESETS = ["VP Product", "Head of Product", "Chief Product Officer", "Director of Product", "Group Product Manager", "Product Operations Lead"];
+const LOCATION_PRESETS = ["United States", "Canada", "Mexico", "United Kingdom", "Germany", "Spain"];
+const CSV_HEADERS = ["source", "job_url", "job_description_text", "country", "company_name", "job_title", "core_illness", "workshop_pitch", "pitch_angle", "fit_score", "urgency_score", "alignment_pain_score", "financial_pain_score", "execution_pain_score", "evidence", "nuance_summary", "recommended_strategy", "processed_at_utc"];
 const MAX_ROLES = 5;
 const MAX_LOCATIONS = 6;
 let selectedRoles = new Set(["VP Product", "Head of Product"]);
 let selectedLocations = new Set(["United States", "Canada", "Mexico"]);
+let latestJobs = [];
 let latestRows = [];
 let latestCsv = "";
 
@@ -491,39 +485,43 @@ function detailMessage(payload) {
   return payload.message || "Request failed.";
 }
 
-function renderResults(payload) {
-  latestRows = payload.rows;
-  latestCsv = payload.csv;
-  const summary = payload.summary;
-  console.info("Leadseek run completed", payload);
-
-  resultsTitle.textContent =
-    summary.succeeded > 0 ? "Workshop-ready leads" : "No leads generated";
-  totalCount.textContent = summary.total;
-  successCount.textContent = summary.succeeded;
-  failedCount.textContent = summary.failed;
+function renderJobs() {
+  const enriched = latestJobs.filter((job) => job.record).length;
+  const failed = latestJobs.filter((job) => job.status === "Failed").length;
+  resultsTitle.textContent = latestJobs.length ? "Curate and enrich leads" : "No run yet";
+  totalCount.textContent = latestJobs.length;
+  successCount.textContent = enriched;
+  failedCount.textContent = failed;
+  enrichButton.disabled = latestJobs.length === 0 || latestJobs.every((job) => !job.selected);
+  latestRows = latestJobs.filter((job) => job.record).map((job) => job.record);
+  latestCsv = rowsToCsv(latestRows);
   csvButton.disabled = latestRows.length === 0;
   sheetsButton.disabled = latestRows.length === 0;
-
   resultsBody.innerHTML = "";
-  if (!latestRows.length) {
-    resultsBody.innerHTML =
-      '<tr><td colspan="6" class="empty">No usable lead rows came back from this run.</td></tr>';
+  if (!latestJobs.length) {
+    resultsBody.innerHTML = '<tr><td colspan="8" class="empty">Fetch jobs to generate your first lead set.</td></tr>';
     return;
   }
-
-  for (const row of latestRows) {
+  latestJobs.forEach((job, index) => {
+    const row = job.record || {};
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td><a href="${escapeAttr(row.job_url)}" target="_blank" rel="noreferrer">${escapeHtml(row.company_name)}</a></td>
-      <td>${escapeHtml(row.job_title)}</td>
-      <td>${escapeHtml(row.country)}</td>
-      <td>${escapeHtml(row.core_illness)}</td>
-      <td>${escapeHtml(row.workshop_pitch)}</td>
-      <td>${escapeHtml(row.pitch_angle)}</td>
+      <td><input type="checkbox" data-index="${index}" ${job.selected ? "checked" : ""}></td>
+      <td><a href="${escapeAttr(job.job_url)}" target="_blank" rel="noreferrer">${escapeHtml(job.company_name)}</a></td>
+      <td>${escapeHtml(job.job_title)}</td>
+      <td>${escapeHtml(job.country)}</td>
+      <td>${escapeHtml(job.status || "Fetched")}</td>
+      <td>${escapeHtml(row.core_illness || "")}</td>
+      <td>${escapeHtml(row.workshop_pitch || "")}</td>
+      <td>${escapeHtml(row.pitch_angle || "")}</td>
     `;
+    const checkbox = tr.querySelector("input[type='checkbox']");
+    checkbox.addEventListener("change", () => {
+      job.selected = checkbox.checked;
+      renderJobs();
+    });
     resultsBody.appendChild(tr);
-  }
+  });
 }
 
 async function runLeads() {
@@ -536,11 +534,11 @@ async function runLeads() {
   }
 
   setLoading(true);
-  setMessage("Searching live jobs and diagnosing signals. This can take a minute.");
+  setMessage("Fetching live jobs. Gemini enrichment will happen only after you choose leads.");
   console.info("Leadseek run started", { roles, locations, limit: Number(limitInput.value || 10) });
 
   try {
-    const response = await fetch("/api/run", {
+    const response = await fetch("/api/fetch-jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -552,18 +550,78 @@ async function runLeads() {
 
     const payload = await response.json();
     if (!response.ok) {
-      console.error("Leadseek run failed", payload);
+      console.error("Leadseek fetch failed", payload);
       throw new Error(detailMessage(payload));
     }
 
-    renderResults(payload);
-    setMessage(`Generated ${payload.summary.succeeded} lead rows. Run ID: ${payload.run_id}.`);
+    latestJobs = payload.jobs.map((job, index) => ({
+      ...job,
+      id: `${payload.run_id}-${index}`,
+      selected: true,
+      status: "Fetched",
+      record: null,
+    }));
+    renderJobs();
+    setMessage(`Fetched ${payload.summary.jobs} jobs using ${payload.summary.serpapi_searches_used} SerpApi searches. Run ID: ${payload.run_id}.`);
+    loadSerpApiUsage();
   } catch (error) {
     console.error("Leadseek frontend error", error);
     setMessage(error.message, true);
   } finally {
     setLoading(false);
   }
+}
+
+async function loadSerpApiUsage() {
+  try {
+    const response = await fetch("/api/serpapi-usage");
+    const payload = await response.json();
+    if (!response.ok) throw new Error(detailMessage(payload));
+    const usage = payload.usage || {};
+    const used = usage.this_month_usage ?? "?";
+    const left = usage.total_searches_left ?? usage.plan_searches_left ?? "?";
+    const allowance = usage.searches_per_month ?? "?";
+    usageStatus.textContent = `SerpApi: ${used}/${allowance} used, ${left} left.`;
+  } catch (error) {
+    usageStatus.textContent = "SerpApi usage unavailable.";
+    console.warn("SerpApi usage lookup failed", error);
+  }
+}
+
+async function enrichSelected() {
+  const selected = latestJobs.filter((job) => job.selected && !job.record);
+  if (!selected.length) {
+    setMessage("Select at least one unenriched job.", true);
+    return;
+  }
+  enrichButton.disabled = true;
+  setMessage(`Enriching ${selected.length} selected jobs, one at a time.`);
+  for (const job of selected) {
+    job.status = "Enriching";
+    renderJobs();
+    try {
+      const response = await fetch("/api/enrich-lead", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(detailMessage(payload));
+      }
+      job.record = payload.record;
+      job.status = `Enriched ${payload.record.fit_score}/100`;
+      console.info("Lead enriched", payload);
+    } catch (error) {
+      job.status = "Failed";
+      job.error = error.message;
+      console.error("Lead enrichment failed", { job, error });
+    }
+    renderJobs();
+  }
+  const succeeded = latestJobs.filter((job) => job.record).length;
+  const failed = latestJobs.filter((job) => job.status === "Failed").length;
+  setMessage(`Enrichment complete. ${succeeded} ready, ${failed} failed.`);
 }
 
 function downloadCsv() {
@@ -607,6 +665,20 @@ async function exportSheets() {
   }
 }
 
+function rowsToCsv(rows) {
+  if (!rows.length) return "";
+  const lines = [CSV_HEADERS.join(",")];
+  for (const row of rows) {
+    lines.push(CSV_HEADERS.map((header) => csvCell(row[header])).join(","));
+  }
+  return `${lines.join("\\n")}\\n`;
+}
+
+function csvCell(value) {
+  const text = Array.isArray(value) ? value.join(" | ") : String(value ?? "");
+  return `"${text.replaceAll('"', '""')}"`;
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -629,7 +701,9 @@ customLocation.addEventListener("keydown", (event) => {
   if (event.key === "Enter") addCustom(selectedLocations, customLocation, MAX_LOCATIONS, "locations");
 });
 runButton.addEventListener("click", runLeads);
+enrichButton.addEventListener("click", enrichSelected);
 csvButton.addEventListener("click", downloadCsv);
 sheetsButton.addEventListener("click", exportSheets);
 renderControls();
+loadSerpApiUsage();
 """

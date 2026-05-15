@@ -44,6 +44,44 @@ class LeadDiagnosis(BaseModel):
         min_length=1,
         description="A one-sentence personalized outbound email hook.",
     )
+    fit_score: int = Field(
+        ge=0,
+        le=100,
+        description="How strong this lead is for the consulting offer.",
+    )
+    urgency_score: int = Field(
+        ge=0,
+        le=100,
+        description="How urgent the organizational pain appears.",
+    )
+    alignment_pain_score: int = Field(
+        ge=0,
+        le=100,
+        description="Evidence of stakeholder, roadmap, or prioritization dysfunction.",
+    )
+    financial_pain_score: int = Field(
+        ge=0,
+        le=100,
+        description="Evidence that product is seen as cost without clear financial return.",
+    )
+    execution_pain_score: int = Field(
+        ge=0,
+        le=100,
+        description="Evidence of slow delivery, bloated process, or delivery scaling pain.",
+    )
+    evidence: list[str] = Field(
+        min_length=1,
+        max_length=5,
+        description="Short evidence snippets or paraphrases from the job description.",
+    )
+    nuance_summary: str = Field(
+        min_length=1,
+        description="A concise read-between-the-lines explanation of the diagnosis.",
+    )
+    recommended_strategy: str = Field(
+        min_length=1,
+        description="A tailored consulting strategy based on the services context.",
+    )
 
 
 class JobPosting(BaseModel):
@@ -69,6 +107,14 @@ class LeadRecord(BaseModel):
     core_illness: CoreIllness
     workshop_pitch: WorkshopPitch
     pitch_angle: str
+    fit_score: int
+    urgency_score: int
+    alignment_pain_score: int
+    financial_pain_score: int
+    execution_pain_score: int
+    evidence: list[str]
+    nuance_summary: str
+    recommended_strategy: str
     processed_at_utc: str
 
     @classmethod
@@ -89,5 +135,13 @@ class LeadRecord(BaseModel):
             core_illness=diagnosis.core_illness,
             workshop_pitch=diagnosis.workshop_pitch,
             pitch_angle=diagnosis.pitch_angle,
+            fit_score=diagnosis.fit_score,
+            urgency_score=diagnosis.urgency_score,
+            alignment_pain_score=diagnosis.alignment_pain_score,
+            financial_pain_score=diagnosis.financial_pain_score,
+            execution_pain_score=diagnosis.execution_pain_score,
+            evidence=diagnosis.evidence,
+            nuance_summary=diagnosis.nuance_summary,
+            recommended_strategy=diagnosis.recommended_strategy,
             processed_at_utc=processed_at_utc,
         )

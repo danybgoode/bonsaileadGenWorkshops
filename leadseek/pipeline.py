@@ -10,9 +10,15 @@ from pathlib import Path
 
 from leadseek.config import AppConfig
 from leadseek.diagnostics import DiagnosisError, GeminiDiagnostician
-from leadseek.ingestion import IngestionError, iter_live_job_postings
-from leadseek.models import LeadRecord
+from leadseek.ingestion import (
+    FetchStats,
+    IngestionError,
+    iter_live_job_postings,
+    iter_live_job_postings_with_stats,
+)
+from leadseek.models import JobPosting, LeadRecord
 from leadseek.output import OutputError, save_leads
+from leadseek.service_context import get_service_context
 from leadseek.text_cleaning import prepare_job_description_for_gemini
 
 
@@ -41,6 +47,82 @@ class ProcessSummary:
 class PipelineResult:
     records: list[LeadRecord]
     summary: ProcessSummary
+
+
+@dataclass(frozen=True)
+class FetchJobsResult:
+    postings: list[JobPosting]
+    stats: FetchStats
+
+
+def fetch_job_candidates(
+    *,
+    roles: list[str],
+    locations: list[str],
+    config: AppConfig,
+    limit: int | None = None,
+) -> FetchJobsResult:
+    """Fetch live jobs without Gemini enrichment."""
+
+    if limit is not None and limit < 1:
+        raise PipelineRunError("--limit must be greater than zero when provided.")
+
+    fetch_limit = limit or 10
+    os.environ.setdefault("SERPAPI_API_KEY", config.serpapi_api_key)
+    logger.info(
+        "Job fetch started roles=%s locations=%s limit=%s",
+        roles,
+        locations,
+        fetch_limit,
+    )
+
+    try:
+        postings, stats = iter_live_job_postings_with_stats(
+            roles=roles,
+            locations=locations,
+            limit=fetch_limit,
+        )
+    except IngestionError as exc:
+        raise PipelineRunError(str(exc)) from exc
+
+    logger.info(
+        "Job fetch finished postings=%s serpapi_searches_used=%s",
+        len(postings),
+        stats.serpapi_searches_used,
+    )
+    return FetchJobsResult(postings=postings, stats=stats)
+
+
+def enrich_posting(
+    *,
+    posting: JobPosting,
+    config: AppConfig,
+    service_context: str | None = None,
+) -> LeadRecord:
+    """Run Gemini enrichment for one curated job posting."""
+
+    gemini_input = prepare_job_description_for_gemini(posting.job_description_text)
+    if not gemini_input:
+        raise PipelineRunError("Job description was empty after cleaning.")
+
+    context = service_context if service_context is not None else get_service_context()
+    with GeminiDiagnostician(
+        api_key=config.gemini_api_key,
+        model=config.gemini_model,
+    ) as diagnostician:
+        try:
+            diagnosis = diagnostician.diagnose(
+                gemini_input,
+                service_context=context,
+            )
+        except DiagnosisError as exc:
+            raise PipelineRunError(str(exc)) from exc
+
+    return LeadRecord.from_diagnosis(
+        posting=posting,
+        diagnosis=diagnosis,
+        processed_at_utc=datetime.now(UTC).isoformat(),
+    )
 
 
 def generate_leads(
@@ -77,6 +159,7 @@ def generate_leads(
 
     records: list[LeadRecord] = []
     failures: list[ProcessingFailure] = []
+    service_context = get_service_context()
 
     with GeminiDiagnostician(
         api_key=config.gemini_api_key,
@@ -97,7 +180,10 @@ def generate_leads(
                 if not gemini_input:
                     raise DiagnosisError("Job description was empty after cleaning.")
 
-                diagnosis = diagnostician.diagnose(gemini_input)
+                diagnosis = diagnostician.diagnose(
+                    gemini_input,
+                    service_context=service_context,
+                )
                 records.append(
                     LeadRecord.from_diagnosis(
                         posting=posting,

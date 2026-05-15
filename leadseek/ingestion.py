@@ -22,6 +22,7 @@ from leadseek.search_options import MAX_LOCATIONS, MAX_ROLES, normalize_search_t
 
 
 SERPAPI_SEARCH_URL = "https://serpapi.com/search.json"
+SERPAPI_ACCOUNT_URL = "https://serpapi.com/account.json"
 DEFAULT_TIMEOUT_SECONDS = 30
 logger = logging.getLogger(__name__)
 
@@ -35,8 +36,44 @@ class QueryState:
     buffer: list[tuple[str, JobPosting]] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class FetchStats:
+    serpapi_searches_used: int
+    query_errors: list[str]
+
+
+@dataclass(frozen=True)
+class LiveJobsResult:
+    jobs: list[dict]
+    stats: FetchStats
+
+
 class IngestionError(RuntimeError):
     """Raised when live job postings cannot be loaded from the API provider."""
+
+
+def fetch_serpapi_account_usage() -> dict[str, Any]:
+    """Return SerpApi account usage details without consuming search credits."""
+
+    api_key = os.getenv("SERPAPI_API_KEY")
+    if not api_key:
+        raise IngestionError("Missing SERPAPI_API_KEY in environment.")
+
+    try:
+        response = requests.get(
+            SERPAPI_ACCOUNT_URL,
+            params={"api_key": api_key},
+            timeout=DEFAULT_TIMEOUT_SECONDS,
+        )
+    except requests.RequestException as exc:
+        raise IngestionError(f"SerpApi account request failed: {exc}") from exc
+
+    if response.status_code >= 400:
+        raise IngestionError(f"SerpApi account API returned HTTP {response.status_code}.")
+
+    payload = response.json()
+    payload.pop("api_key", None)
+    return payload
 
 
 def fetch_live_jobs(roles: list, locations: list, limit: int = 10) -> list[dict]:
@@ -55,6 +92,16 @@ def fetch_live_jobs(roles: list, locations: list, limit: int = 10) -> list[dict]
         IngestionError: Missing API key, rate limit, HTTP/API failure, bad input,
         or no usable job descriptions found.
     """
+
+    return fetch_live_jobs_with_stats(roles, locations, limit).jobs
+
+
+def fetch_live_jobs_with_stats(
+    roles: list,
+    locations: list,
+    limit: int = 10,
+) -> LiveJobsResult:
+    """Fetch live job postings with SerpApi usage metadata."""
 
     try:
         normalized_roles = normalize_search_terms(
@@ -80,6 +127,7 @@ def fetch_live_jobs(roles: list, locations: list, limit: int = 10) -> list[dict]
     postings: list[JobPosting] = []
     seen_keys: set[str] = set()
     query_errors: list[str] = []
+    serpapi_searches_used = 0
     states = [
         QueryState(role=role, location=location)
         for role in normalized_roles
@@ -106,6 +154,7 @@ def fetch_live_jobs(roles: list, locations: list, limit: int = 10) -> list[dict]
                         state=state,
                         api_key=api_key,
                     )
+                    serpapi_searches_used += 1
                 except IngestionError as exc:
                     state.exhausted = True
                     message = f"{state.role} in {state.location}: {exc}"
@@ -151,8 +200,18 @@ def fetch_live_jobs(roles: list, locations: list, limit: int = 10) -> list[dict]
     if query_errors:
         logger.warning("Completed with partial query errors: %s", query_errors[:5])
 
-    logger.info("Completed SerpApi fetch usable_jobs=%s", len(postings))
-    return [_posting_to_public_dict(posting) for posting in postings]
+    logger.info(
+        "Completed SerpApi fetch usable_jobs=%s serpapi_searches_used=%s",
+        len(postings),
+        serpapi_searches_used,
+    )
+    return LiveJobsResult(
+        jobs=[_posting_to_public_dict(posting) for posting in postings],
+        stats=FetchStats(
+            serpapi_searches_used=serpapi_searches_used,
+            query_errors=query_errors,
+        ),
+    )
 
 
 def iter_live_job_postings(
@@ -164,6 +223,22 @@ def iter_live_job_postings(
     """Return validated JobPosting models for pipeline use."""
 
     raw_jobs = fetch_live_jobs(roles=roles, locations=locations, limit=limit)
+    return _validate_live_jobs(raw_jobs)
+
+
+def iter_live_job_postings_with_stats(
+    *,
+    roles: list[str],
+    locations: list[str],
+    limit: int = 10,
+) -> tuple[list[JobPosting], FetchStats]:
+    """Return validated JobPosting models plus fetch stats for web UI."""
+
+    result = fetch_live_jobs_with_stats(roles=roles, locations=locations, limit=limit)
+    return _validate_live_jobs(result.jobs), result.stats
+
+
+def _validate_live_jobs(raw_jobs: list[dict]) -> list[JobPosting]:
     postings: list[JobPosting] = []
     for raw_job in raw_jobs:
         try:

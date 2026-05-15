@@ -23,6 +23,14 @@ CSV_HEADERS = [
     "core_illness",
     "workshop_pitch",
     "pitch_angle",
+    "fit_score",
+    "urgency_score",
+    "alignment_pain_score",
+    "financial_pain_score",
+    "execution_pain_score",
+    "evidence",
+    "nuance_summary",
+    "recommended_strategy",
     "processed_at_utc",
 ]
 
@@ -61,6 +69,8 @@ def save_leads(records: list[LeadRecord], output_path: Path) -> None:
 
 def _record_to_csv_row(record: LeadRecord) -> dict[str, str]:
     data = record.model_dump(mode="json")
+    if isinstance(data.get("evidence"), list):
+        data["evidence"] = " | ".join(str(item) for item in data["evidence"])
     return {header: str(data[header]) for header in CSV_HEADERS}
 
 

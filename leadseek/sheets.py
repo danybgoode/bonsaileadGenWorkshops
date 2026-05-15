@@ -88,4 +88,6 @@ def _load_service_account_info() -> dict[str, Any]:
 def _stringify(value: Any) -> str:
     if value is None:
         return ""
+    if isinstance(value, list):
+        return " | ".join(str(item) for item in value)
     return str(value)

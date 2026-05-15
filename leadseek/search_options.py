@@ -23,7 +23,7 @@ LOCATION_PRESETS = [
 
 MAX_ROLES = 5
 MAX_LOCATIONS = 6
-MAX_LIMIT = 25
+MAX_LIMIT = 50
 
 
 def normalize_search_terms(values: list[str], *, label: str, max_items: int) -> list[str]:

@@ -33,13 +33,18 @@ class GeminiDiagnostician:
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         self.close()
 
-    def diagnose(self, job_description: str) -> LeadDiagnosis:
+    def diagnose(
+        self,
+        job_description: str,
+        *,
+        service_context: str | None = None,
+    ) -> LeadDiagnosis:
         """Ask Gemini for a strict JSON diagnosis and validate it locally."""
 
         try:
             response = self._client.models.generate_content(
                 model=self._model,
-                contents=build_user_prompt(job_description),
+                contents=build_user_prompt(job_description, service_context),
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_PROMPT,
                     temperature=0.1,
