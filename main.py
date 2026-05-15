@@ -52,6 +52,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional maximum number of job descriptions to process.",
     )
     process.add_argument(
+        "--providers",
+        default="serpapi",
+        help='Comma-separated job data providers: "serpapi", "adzuna", or "serpapi, adzuna".',
+    )
+    process.add_argument(
         "--fail-fast",
         action="store_true",
         help="Stop on the first failed job description instead of continuing.",
@@ -71,7 +76,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "process-leads":
         try:
-            config = AppConfig.from_env(model_override=args.model)
+            providers = _split_csv_arg(args.providers)
+            config = AppConfig.from_env(
+                model_override=args.model,
+                require_serpapi=any(
+                    provider.casefold() == "serpapi" for provider in providers
+                ),
+            )
             summary = process_leads(
                 roles=_split_csv_arg(args.roles),
                 locations=_split_csv_arg(args.locations),
@@ -79,6 +90,7 @@ def main(argv: list[str] | None = None) -> int:
                 config=config,
                 limit=args.limit,
                 fail_fast=args.fail_fast,
+                providers=providers,
             )
         except (ConfigError, PipelineRunError) as exc:
             print(f"Error: {exc}", file=sys.stderr)

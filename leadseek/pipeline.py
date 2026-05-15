@@ -61,6 +61,7 @@ def fetch_job_candidates(
     locations: list[str],
     config: AppConfig,
     limit: int | None = None,
+    providers: list[str] | None = None,
 ) -> FetchJobsResult:
     """Fetch live jobs without Gemini enrichment."""
 
@@ -68,9 +69,11 @@ def fetch_job_candidates(
         raise PipelineRunError("--limit must be greater than zero when provided.")
 
     fetch_limit = limit or 10
-    os.environ.setdefault("SERPAPI_API_KEY", config.serpapi_api_key)
+    if config.serpapi_api_key:
+        os.environ.setdefault("SERPAPI_API_KEY", config.serpapi_api_key)
     logger.info(
-        "Job fetch started roles=%s locations=%s limit=%s",
+        "Job fetch started providers=%s roles=%s locations=%s limit=%s",
+        providers or ["serpapi"],
         roles,
         locations,
         fetch_limit,
@@ -81,14 +84,16 @@ def fetch_job_candidates(
             roles=roles,
             locations=locations,
             limit=fetch_limit,
+            providers=providers,
         )
     except IngestionError as exc:
         raise PipelineRunError(str(exc)) from exc
 
     logger.info(
-        "Job fetch finished postings=%s serpapi_searches_used=%s",
+        "Job fetch finished postings=%s serpapi_searches_used=%s adzuna_searches_used=%s",
         len(postings),
         stats.serpapi_searches_used,
+        stats.adzuna_searches_used,
     )
     return FetchJobsResult(postings=postings, stats=stats)
 
@@ -132,6 +137,7 @@ def generate_leads(
     config: AppConfig,
     limit: int | None = None,
     fail_fast: bool = False,
+    providers: list[str] | None = None,
 ) -> PipelineResult:
     """Run live ingestion and diagnosis, returning records without persistence."""
 
@@ -139,9 +145,11 @@ def generate_leads(
         raise PipelineRunError("--limit must be greater than zero when provided.")
 
     fetch_limit = limit or 10
-    os.environ.setdefault("SERPAPI_API_KEY", config.serpapi_api_key)
+    if config.serpapi_api_key:
+        os.environ.setdefault("SERPAPI_API_KEY", config.serpapi_api_key)
     logger.info(
-        "Lead generation started roles=%s locations=%s limit=%s fail_fast=%s",
+        "Lead generation started providers=%s roles=%s locations=%s limit=%s fail_fast=%s",
+        providers or ["serpapi"],
         roles,
         locations,
         fetch_limit,
@@ -153,6 +161,7 @@ def generate_leads(
             roles=roles,
             locations=locations,
             limit=fetch_limit,
+            providers=providers,
         )
     except IngestionError as exc:
         raise PipelineRunError(str(exc)) from exc
@@ -231,6 +240,7 @@ def process_leads(
     config: AppConfig,
     limit: int | None = None,
     fail_fast: bool = False,
+    providers: list[str] | None = None,
 ) -> ProcessSummary:
     """Run the full lead diagnosis pipeline."""
 
@@ -240,6 +250,7 @@ def process_leads(
         config=config,
         limit=limit,
         fail_fast=fail_fast,
+        providers=providers,
     )
 
     try:

@@ -23,12 +23,14 @@ from leadseek.search_options import MAX_LOCATIONS, MAX_ROLES, normalize_search_t
 
 SERPAPI_SEARCH_URL = "https://serpapi.com/search.json"
 SERPAPI_ACCOUNT_URL = "https://serpapi.com/account.json"
+ADZUNA_SEARCH_URL = "https://api.adzuna.com/v1/api/jobs/{country_code}/search/{page}"
 DEFAULT_TIMEOUT_SECONDS = 30
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class QueryState:
+    provider: str
     role: str
     location: str
     next_page_token: str | None = None
@@ -39,6 +41,7 @@ class QueryState:
 @dataclass(frozen=True)
 class FetchStats:
     serpapi_searches_used: int
+    adzuna_searches_used: int
     query_errors: list[str]
 
 
@@ -76,13 +79,19 @@ def fetch_serpapi_account_usage() -> dict[str, Any]:
     return payload
 
 
-def fetch_live_jobs(roles: list, locations: list, limit: int = 10) -> list[dict]:
-    """Fetch live job postings from SerpApi Google Jobs.
+def fetch_live_jobs(
+    roles: list,
+    locations: list,
+    limit: int = 10,
+    providers: list[str] | None = None,
+) -> list[dict]:
+    """Fetch live job postings from configured job data providers.
 
     Args:
         roles: Target role queries, for example ["VP Product", "Head of Product"].
         locations: Target locations, for example ["US", "Canada", "Mexico"].
         limit: Maximum number of normalized postings to return across all queries.
+        providers: Optional provider names, currently "serpapi" and "adzuna".
 
     Returns:
         A list of dictionaries with company_name, job_title,
@@ -93,13 +102,14 @@ def fetch_live_jobs(roles: list, locations: list, limit: int = 10) -> list[dict]
         or no usable job descriptions found.
     """
 
-    return fetch_live_jobs_with_stats(roles, locations, limit).jobs
+    return fetch_live_jobs_with_stats(roles, locations, limit, providers).jobs
 
 
 def fetch_live_jobs_with_stats(
     roles: list,
     locations: list,
     limit: int = 10,
+    providers: list[str] | None = None,
 ) -> LiveJobsResult:
     """Fetch live job postings with SerpApi usage metadata."""
 
@@ -120,44 +130,57 @@ def fetch_live_jobs_with_stats(
     if limit < 1:
         raise IngestionError("limit must be greater than zero.")
 
-    api_key = os.getenv("SERPAPI_API_KEY")
-    if not api_key:
+    normalized_providers = _normalize_providers(providers)
+    serpapi_key = os.getenv("SERPAPI_API_KEY")
+    adzuna_app_id = os.getenv("ADZUNA_APP_ID")
+    adzuna_app_key = os.getenv("ADZUNA_APP_KEY")
+    if "serpapi" in normalized_providers and not serpapi_key:
         raise IngestionError("Missing SERPAPI_API_KEY in environment.")
+    if "adzuna" in normalized_providers and (not adzuna_app_id or not adzuna_app_key):
+        raise IngestionError("Missing ADZUNA_APP_ID or ADZUNA_APP_KEY in environment.")
 
     postings: list[JobPosting] = []
     seen_keys: set[str] = set()
     query_errors: list[str] = []
     serpapi_searches_used = 0
+    adzuna_searches_used = 0
     states = [
-        QueryState(role=role, location=location)
+        QueryState(provider=provider, role=role, location=location)
+        for provider in normalized_providers
         for role in normalized_roles
         for location in normalized_locations
     ]
 
     logger.info(
-        "Starting SerpApi Google Jobs fetch roles=%s locations=%s limit=%s query_pairs=%s",
+        "Starting job fetch providers=%s roles=%s locations=%s limit=%s query_pairs=%s",
+        normalized_providers,
         normalized_roles,
         normalized_locations,
         limit,
         len(states),
     )
 
-    while len(postings) < limit and any(not state.exhausted for state in states):
+    while len(postings) < limit and any(state.buffer or not state.exhausted for state in states):
         added_this_round = 0
         for state in states:
-            if state.exhausted or len(postings) >= limit:
+            if len(postings) >= limit or (state.exhausted and not state.buffer):
                 continue
 
             if not state.buffer:
                 try:
                     _fill_query_buffer(
                         state=state,
-                        api_key=api_key,
+                        serpapi_key=serpapi_key or "",
+                        adzuna_app_id=adzuna_app_id or "",
+                        adzuna_app_key=adzuna_app_key or "",
                     )
-                    serpapi_searches_used += 1
+                    if state.provider == "serpapi":
+                        serpapi_searches_used += 1
+                    if state.provider == "adzuna":
+                        adzuna_searches_used += 1
                 except IngestionError as exc:
                     state.exhausted = True
-                    message = f"{state.role} in {state.location}: {exc}"
+                    message = f"{state.provider} {state.role} in {state.location}: {exc}"
                     query_errors.append(message)
                     logger.warning("Skipping failed search query: %s", message)
                     continue
@@ -172,7 +195,8 @@ def fetch_live_jobs_with_stats(
             if added_posting:
                 added_this_round += 1
                 logger.info(
-                    "Added posting role=%r location=%r total=%s buffer_remaining=%s",
+                    "Added posting provider=%r role=%r location=%r total=%s buffer_remaining=%s",
+                    state.provider,
                     state.role,
                     state.location,
                     len(postings),
@@ -201,14 +225,16 @@ def fetch_live_jobs_with_stats(
         logger.warning("Completed with partial query errors: %s", query_errors[:5])
 
     logger.info(
-        "Completed SerpApi fetch usable_jobs=%s serpapi_searches_used=%s",
+        "Completed job fetch usable_jobs=%s serpapi_searches_used=%s adzuna_searches_used=%s",
         len(postings),
         serpapi_searches_used,
+        adzuna_searches_used,
     )
     return LiveJobsResult(
         jobs=[_posting_to_public_dict(posting) for posting in postings],
         stats=FetchStats(
             serpapi_searches_used=serpapi_searches_used,
+            adzuna_searches_used=adzuna_searches_used,
             query_errors=query_errors,
         ),
     )
@@ -219,10 +245,16 @@ def iter_live_job_postings(
     roles: list[str],
     locations: list[str],
     limit: int = 10,
+    providers: list[str] | None = None,
 ) -> list[JobPosting]:
     """Return validated JobPosting models for pipeline use."""
 
-    raw_jobs = fetch_live_jobs(roles=roles, locations=locations, limit=limit)
+    raw_jobs = fetch_live_jobs(
+        roles=roles,
+        locations=locations,
+        limit=limit,
+        providers=providers,
+    )
     return _validate_live_jobs(raw_jobs)
 
 
@@ -231,10 +263,16 @@ def iter_live_job_postings_with_stats(
     roles: list[str],
     locations: list[str],
     limit: int = 10,
+    providers: list[str] | None = None,
 ) -> tuple[list[JobPosting], FetchStats]:
     """Return validated JobPosting models plus fetch stats for web UI."""
 
-    result = fetch_live_jobs_with_stats(roles=roles, locations=locations, limit=limit)
+    result = fetch_live_jobs_with_stats(
+        roles=roles,
+        locations=locations,
+        limit=limit,
+        providers=providers,
+    )
     return _validate_live_jobs(result.jobs), result.stats
 
 
@@ -306,9 +344,40 @@ def _fetch_google_jobs_page(
     return payload
 
 
-def _fill_query_buffer(*, state: QueryState, api_key: str) -> None:
+def _fill_query_buffer(
+    *,
+    state: QueryState,
+    serpapi_key: str,
+    adzuna_app_id: str,
+    adzuna_app_key: str,
+) -> None:
+    if state.provider == "adzuna":
+        page = int(state.next_page_token or "1")
+        postings, has_more = _fetch_adzuna_jobs(
+            app_id=adzuna_app_id,
+            app_key=adzuna_app_key,
+            role=state.role,
+            location=state.location,
+            page=page,
+        )
+        state.buffer.extend(
+            (_dedupe_key({}, posting), posting)
+            for posting in postings
+        )
+        state.next_page_token = str(page + 1) if has_more else None
+        state.exhausted = not has_more
+        logger.info(
+            "Fetched Adzuna query role=%r location=%r page=%s buffered=%s has_more=%s",
+            state.role,
+            state.location,
+            page,
+            len(state.buffer),
+            has_more,
+        )
+        return
+
     payload = _fetch_google_jobs_page(
-        api_key=api_key,
+        api_key=serpapi_key,
         role=state.role,
         location=state.location,
         next_page_token=state.next_page_token,
@@ -379,6 +448,57 @@ def _normalize_serpapi_job(
     )
 
 
+def _fetch_adzuna_jobs(
+    *,
+    app_id: str,
+    app_key: str,
+    role: str,
+    location: str,
+    page: int = 1,
+) -> tuple[list[JobPosting], bool]:
+    country_code = _adzuna_country_code(location)
+    params = {
+        "app_id": app_id,
+        "app_key": app_key,
+        "what": role,
+        "where": location,
+        "results_per_page": 10,
+        "content-type": "application/json",
+    }
+    try:
+        response = requests.get(
+            ADZUNA_SEARCH_URL.format(country_code=country_code, page=page),
+            params=params,
+            timeout=DEFAULT_TIMEOUT_SECONDS,
+        )
+    except requests.RequestException as exc:
+        raise IngestionError(f"Adzuna request failed: {exc}") from exc
+
+    if response.status_code >= 400:
+        raise IngestionError(f"Adzuna returned HTTP {response.status_code}: {response.text[:240]}")
+
+    payload = response.json()
+    postings: list[JobPosting] = []
+    for result in payload.get("results", []):
+        description = _clean_text(result.get("description"))
+        if not description:
+            continue
+        company = result.get("company") or {}
+        postings.append(
+            JobPosting(
+                company_name=_clean_text(company.get("display_name")) or "Unknown",
+                job_title=_clean_text(result.get("title")) or "Unknown Product Role",
+                job_description_text=description,
+                job_url=_clean_text(result.get("redirect_url")) or "Unavailable",
+                country=_country_from_location(location),
+                source="adzuna",
+            )
+        )
+    total_count = int(payload.get("count") or 0)
+    has_more = bool(postings) and page * params["results_per_page"] < total_count
+    return postings, has_more
+
+
 def _extract_job_url(result: dict[str, Any]) -> str:
     apply_options = result.get("apply_options") or []
     for option in apply_options:
@@ -400,6 +520,7 @@ def _extract_job_url(result: dict[str, Any]) -> str:
 
 def _posting_to_public_dict(posting: JobPosting) -> dict[str, str]:
     return {
+        "source": posting.source,
         "company_name": posting.company_name,
         "job_title": posting.job_title,
         "job_description_text": posting.job_description_text,
@@ -427,3 +548,42 @@ def _clean_text(value: Any) -> str:
 def _country_from_location(location: str) -> str:
     parts = [part.strip() for part in location.split(",") if part.strip()]
     return parts[-1] if parts else location.strip()
+
+
+def _normalize_providers(providers: list[str] | None) -> list[str]:
+    normalized = []
+    supported = {"serpapi", "adzuna"}
+    for provider in providers or ["serpapi"]:
+        value = provider.strip().casefold()
+        if value not in supported:
+            raise IngestionError(f"Unsupported job data provider: {provider}.")
+        if value not in normalized:
+            normalized.append(value)
+    if not normalized:
+        raise IngestionError("Select at least one job data provider.")
+    return normalized
+
+
+def _adzuna_country_code(location: str) -> str:
+    normalized = _country_from_location(location).casefold()
+    mapping = {
+        "united states": "us",
+        "us": "us",
+        "usa": "us",
+        "canada": "ca",
+        "ca": "ca",
+        "united kingdom": "gb",
+        "uk": "gb",
+        "gb": "gb",
+        "germany": "de",
+        "de": "de",
+        "france": "fr",
+        "fr": "fr",
+        "spain": "es",
+        "es": "es",
+        "australia": "au",
+        "au": "au",
+        "netherlands": "nl",
+        "nl": "nl",
+    }
+    return mapping.get(normalized, normalized[:2] or "us")

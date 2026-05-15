@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import os
 import uuid
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel, Field
 
 from leadseek.config import AppConfig, ConfigError
@@ -39,6 +41,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger(__name__)
+ROOT_DIR = Path(__file__).parent
 
 app = FastAPI(title="Leadseek")
 
@@ -47,6 +50,7 @@ class RunLeadsRequest(BaseModel):
     roles: list[str] = Field(min_length=1)
     locations: list[str] = Field(min_length=1)
     limit: int = Field(default=10, ge=1, le=MAX_LIMIT)
+    providers: list[str] = Field(default_factory=lambda: ["serpapi"])
 
 
 class EnrichLeadRequest(BaseModel):
@@ -72,6 +76,11 @@ def frontend_script() -> Response:
     return Response(APP_JS, media_type="application/javascript")
 
 
+@app.get("/snowball.svg", include_in_schema=False)
+def snowball() -> FileResponse:
+    return FileResponse(ROOT_DIR / "snowball.svg", media_type="image/svg+xml")
+
+
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -85,20 +94,23 @@ def options() -> dict[str, Any]:
         "max_roles": MAX_ROLES,
         "max_locations": MAX_LOCATIONS,
         "max_limit": MAX_LIMIT,
+        "providers": ["serpapi", "adzuna"],
     }
 
 
 @app.get("/api/serpapi-usage")
 def serpapi_usage() -> dict[str, Any]:
+    adzuna_configured = bool(os.getenv("ADZUNA_APP_ID") and os.getenv("ADZUNA_APP_KEY"))
     try:
         usage = fetch_serpapi_account_usage()
     except IngestionError as exc:
         logger.warning("SerpApi usage lookup failed: %s", exc)
-        raise HTTPException(
-            status_code=400,
-            detail={"message": str(exc), "run_id": "usage"},
-        ) from exc
-    return {"usage": usage}
+        return {
+            "usage": None,
+            "adzuna_configured": adzuna_configured,
+            "warning": str(exc),
+        }
+    return {"usage": usage, "adzuna_configured": adzuna_configured}
 
 
 def _validated_search_inputs(request: RunLeadsRequest) -> tuple[list[str], list[str]]:
@@ -121,18 +133,23 @@ def fetch_jobs(request: RunLeadsRequest) -> dict[str, Any]:
     try:
         roles, locations = _validated_search_inputs(request)
         logger.info(
-            "UI fetch requested run_id=%s roles=%s locations=%s limit=%s",
+            "UI fetch requested run_id=%s providers=%s roles=%s locations=%s limit=%s",
             run_id,
+            request.providers,
             roles,
             locations,
             request.limit,
         )
-        config = AppConfig.from_env()
+        config = AppConfig.from_env(
+            require_gemini=False,
+            require_serpapi=_uses_provider(request.providers, "serpapi"),
+        )
         result = fetch_job_candidates(
             roles=roles,
             locations=locations,
             config=config,
             limit=request.limit,
+            providers=request.providers,
         )
     except (ConfigError, PipelineRunError) as exc:
         logger.exception("UI fetch failed run_id=%s error=%s", run_id, exc)
@@ -147,12 +164,13 @@ def fetch_jobs(request: RunLeadsRequest) -> dict[str, Any]:
             detail={"message": str(exc), "run_id": run_id},
         ) from exc
 
-    jobs = [posting.model_dump(mode="json") for posting in result.postings]
+    jobs = [_posting_for_ui(posting) for posting in result.postings]
     logger.info(
-        "UI fetch completed run_id=%s jobs=%s serpapi_searches_used=%s",
+        "UI fetch completed run_id=%s jobs=%s serpapi_searches_used=%s adzuna_searches_used=%s",
         run_id,
         len(jobs),
         result.stats.serpapi_searches_used,
+        result.stats.adzuna_searches_used,
     )
     return {
         "run_id": run_id,
@@ -160,16 +178,34 @@ def fetch_jobs(request: RunLeadsRequest) -> dict[str, Any]:
         "summary": {
             "jobs": len(jobs),
             "serpapi_searches_used": result.stats.serpapi_searches_used,
+            "adzuna_searches_used": result.stats.adzuna_searches_used,
             "query_errors": result.stats.query_errors,
         },
     }
+
+
+def _posting_for_ui(posting: JobPosting) -> dict[str, Any]:
+    data = posting.model_dump(mode="json")
+    data["job_text_summary"] = _summarize_job_text(posting.job_description_text)
+    return data
+
+
+def _summarize_job_text(text: str) -> str:
+    cleaned = " ".join(text.split())
+    if len(cleaned) <= 280:
+        return cleaned
+    return f"{cleaned[:277].rsplit(' ', 1)[0]}..."
+
+
+def _uses_provider(providers: list[str], provider_name: str) -> bool:
+    return any(provider.strip().casefold() == provider_name for provider in providers)
 
 
 @app.post("/api/enrich-lead")
 def enrich_lead(request: EnrichLeadRequest) -> dict[str, Any]:
     run_id = uuid.uuid4().hex[:10]
     try:
-        config = AppConfig.from_env()
+        config = AppConfig.from_env(require_serpapi=False)
         posting = JobPosting.model_validate(request.job)
         logger.info(
             "UI enrichment requested run_id=%s company=%r title=%r",
@@ -195,19 +231,23 @@ def run_leads(request: RunLeadsRequest) -> dict[str, Any]:
     try:
         roles, locations = _validated_search_inputs(request)
         logger.info(
-            "Legacy UI run requested run_id=%s roles=%s locations=%s limit=%s",
+            "Legacy UI run requested run_id=%s providers=%s roles=%s locations=%s limit=%s",
             run_id,
+            request.providers,
             roles,
             locations,
             request.limit,
         )
-        config = AppConfig.from_env()
+        config = AppConfig.from_env(
+            require_serpapi=_uses_provider(request.providers, "serpapi"),
+        )
         result = generate_leads(
             roles=roles,
             locations=locations,
             config=config,
             limit=request.limit,
             fail_fast=False,
+            providers=request.providers,
         )
     except (ConfigError, PipelineRunError) as exc:
         logger.exception("Legacy UI run failed run_id=%s error=%s", run_id, exc)
