@@ -140,8 +140,199 @@ INDEX_HTML = """<!doctype html>
           </table>
         </div>
       </section>
+
+      <section class="control-panel" id="merchantSection">
+        <h2 style="margin:0 0 4px">🏪 Merchant Acquisition</h2>
+        <p style="margin:0 0 20px;color:var(--text-muted,#888);font-size:.9rem">Find businesses for despachobonsai.com</p>
+
+        <div class="field-group">
+          <div class="label-row"><label>Data source</label></div>
+          <div class="preset-grid">
+            <label class="preset-btn" style="display:flex;align-items:center;gap:6px;cursor:pointer">
+              <input type="radio" name="sellerSource" value="serpapi" checked id="sellerSourceSerpapi" />
+              SerpAPI Google Local
+            </label>
+            <label class="preset-btn" style="display:flex;align-items:center;gap:6px;cursor:pointer">
+              <input type="radio" name="sellerSource" value="unclaimed" id="sellerSourceUnclaimed" />
+              Unclaimed Miyagisanchez Shops
+            </label>
+          </div>
+        </div>
+
+        <div class="field-group" id="sellerSerpFields">
+          <div class="label-row"><label>Search query</label></div>
+          <input id="sellerQuery" type="text" placeholder="taller mecánico" style="width:100%;box-sizing:border-box" autocomplete="off" />
+
+          <div class="label-row" style="margin-top:12px"><label>Location</label></div>
+          <input id="sellerLocation" type="text" value="Ciudad de México, Mexico" style="width:100%;box-sizing:border-box" autocomplete="off" />
+
+          <div class="label-row" style="margin-top:12px"><label>State</label></div>
+          <input id="sellerState" type="text" value="Ciudad de México" style="width:100%;box-sizing:border-box" autocomplete="off" />
+        </div>
+
+        <div class="control-row" style="margin-top:12px">
+          <label class="limit-control" for="sellerLimit">
+            <span>Limit</span>
+            <input id="sellerLimit" type="number" min="1" max="100" value="20" />
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="sellerEnrich" checked />
+            <span>Enrich with Gemini</span>
+          </label>
+        </div>
+
+        <div class="actions" style="margin-top:16px">
+          <button id="sellerRunButton" class="button primary" type="button">Run</button>
+          <button id="sellerExportButton" class="button" type="button" style="display:none">Export CSV</button>
+        </div>
+
+        <div id="sellerStatus" style="margin-top:12px;font-size:.85rem;color:var(--text-muted,#888)"></div>
+
+        <div class="results-panel" id="sellerResultsPanel" style="display:none;margin-top:16px;overflow-x:auto">
+          <table class="results-table">
+            <thead>
+              <tr>
+                <th>Business</th>
+                <th>Type</th>
+                <th>City</th>
+                <th>Rating</th>
+                <th>Pain Category</th>
+                <th>Urgency</th>
+                <th>Outreach Angle</th>
+                <th>Fit Score</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="sellerResultsBody">
+              <tr><td colspan="9" class="empty">Run to find merchant leads.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
     </main>
     <script src="/app.js"></script>
+    <script>
+(function () {
+  // Merchant Acquisition section — self-contained, no shared state with job leads JS
+
+  var lastSellerCsv = "";
+
+  function setSellerStatus(msg) {
+    document.getElementById("sellerStatus").textContent = msg;
+  }
+
+  function sourceChanged() {
+    var isSerpapi = document.getElementById("sellerSourceSerpapi").checked;
+    document.getElementById("sellerSerpFields").style.display = isSerpapi ? "" : "none";
+  }
+
+  document.querySelectorAll("input[name='sellerSource']").forEach(function (el) {
+    el.addEventListener("change", sourceChanged);
+  });
+  sourceChanged();
+
+  document.getElementById("sellerRunButton").addEventListener("click", function () {
+    var source = document.querySelector("input[name='sellerSource']:checked").value;
+    var query = document.getElementById("sellerQuery").value.trim();
+    var location = document.getElementById("sellerLocation").value.trim();
+    var state = document.getElementById("sellerState").value.trim();
+    var limit = parseInt(document.getElementById("sellerLimit").value, 10) || 20;
+    var enrich = document.getElementById("sellerEnrich").checked;
+
+    if (source === "serpapi" && !query) {
+      setSellerStatus("Please enter a search query.");
+      return;
+    }
+
+    var btn = document.getElementById("sellerRunButton");
+    btn.disabled = true;
+    btn.textContent = "Running…";
+    setSellerStatus("Fetching leads…");
+    document.getElementById("sellerExportButton").style.display = "none";
+
+    fetch("/api/seller-leads/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: source, query: query, location: location, state: state, limit: limit, enrich: enrich })
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        btn.disabled = false;
+        btn.textContent = "Run";
+        if (data.error) {
+          setSellerStatus("Error: " + data.error);
+          return;
+        }
+        var leads = data.leads || [];
+        lastSellerCsv = data.csv || "";
+        setSellerStatus("Found " + leads.length + " leads (" + (data.summary && data.summary.enriched || 0) + " enriched).");
+        renderSellerTable(leads);
+        document.getElementById("sellerResultsPanel").style.display = "";
+        if (lastSellerCsv) document.getElementById("sellerExportButton").style.display = "";
+      })
+      .catch(function (err) {
+        btn.disabled = false;
+        btn.textContent = "Run";
+        setSellerStatus("Request failed: " + err.message);
+      });
+  });
+
+  document.getElementById("sellerExportButton").addEventListener("click", function () {
+    if (!lastSellerCsv) return;
+    var blob = new Blob([lastSellerCsv], { type: "text/csv" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = "seller_leads.csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
+
+  function painBadge(category) {
+    var labels = {
+      "single_channel_trap": "Single Channel",
+      "offline_only": "Offline Only",
+      "fragmented_ops": "Fragmented Ops",
+      "no_online_presence": "No Online Presence"
+    };
+    return labels[category] || category || "—";
+  }
+
+  function renderSellerTable(leads) {
+    var tbody = document.getElementById("sellerResultsBody");
+    if (!leads || !leads.length) {
+      tbody.innerHTML = "<tr><td colspan='9' class='empty'>No leads found.</td></tr>";
+      return;
+    }
+    var rows = leads.map(function (lead) {
+      var diag = lead.diagnosis || {};
+      var shopLink = lead.miyagisanchez_shop_url
+        ? "<a href='" + lead.miyagisanchez_shop_url + "' target='_blank' rel='noreferrer'>View Shop</a>"
+        : "—";
+      var fitScore = diag.fit_score != null ? diag.fit_score : "—";
+      var fitColor = diag.fit_score >= 70 ? "color:#22c55e" : diag.fit_score >= 40 ? "color:#f59e0b" : "";
+      return "<tr>" +
+        "<td>" + esc(lead.business_name) + "</td>" +
+        "<td>" + esc(lead.business_type || "—") + "</td>" +
+        "<td>" + esc(lead.city || "—") + "</td>" +
+        "<td>" + (lead.rating != null ? lead.rating + " ⭐" : "—") + "</td>" +
+        "<td>" + esc(painBadge(diag.pain_category)) + "</td>" +
+        "<td style='text-align:center'>" + (diag.urgency != null ? diag.urgency + "/5" : "—") + "</td>" +
+        "<td style='max-width:220px;white-space:normal'>" + esc(diag.suggested_outreach || "—") + "</td>" +
+        "<td style='text-align:center;" + fitColor + "'>" + fitScore + "</td>" +
+        "<td>" + shopLink + "</td>" +
+        "</tr>";
+    });
+    tbody.innerHTML = rows.join("");
+  }
+
+  function esc(str) {
+    return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+})();
+    </script>
   </body>
 </html>
 """

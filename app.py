@@ -32,6 +32,8 @@ from leadseek.search_options import (
     ROLE_PRESETS,
     normalize_search_terms,
 )
+from leadseek.seller_pipeline import SELLER_LEADS_CSV, process_seller_leads
+from leadseek.seller_output import read_seller_leads_csv, seller_leads_to_csv_text
 from leadseek.web_assets import APP_JS, INDEX_HTML, STYLES_CSS
 
 
@@ -282,6 +284,72 @@ def run_leads(request: RunLeadsRequest) -> dict[str, Any]:
             "failures": [failure.__dict__ for failure in result.summary.failures],
         },
     }
+
+
+class RunSellerLeadsRequest(BaseModel):
+    source: str = "serpapi"   # 'serpapi' | 'unclaimed'
+    query: str = ""
+    location: str = "Ciudad de México, Mexico"
+    state: str = "Ciudad de México"
+    limit: int = Field(default=20, ge=1, le=100)
+    enrich: bool = True
+    push_hubspot: bool = False
+
+
+@app.post("/api/seller-leads/run")
+def run_seller_leads(req: RunSellerLeadsRequest) -> dict[str, Any]:
+    """Trigger a seller lead acquisition run. Returns results immediately (sync for MVP)."""
+    run_id = uuid.uuid4().hex[:10]
+    try:
+        config = AppConfig.from_env(
+            require_gemini=req.enrich,
+            require_serpapi=req.source == "serpapi",
+        )
+        logger.info(
+            "Seller leads run requested run_id=%s source=%s query=%r location=%r limit=%s enrich=%s",
+            run_id,
+            req.source,
+            req.query,
+            req.location,
+            req.limit,
+            req.enrich,
+        )
+        leads = process_seller_leads(
+            source=req.source,
+            query=req.query,
+            location=req.location,
+            state=req.state,
+            limit=req.limit,
+            enrich=req.enrich,
+            push_hubspot=req.push_hubspot,
+            config=config,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Seller leads run failed run_id=%s error=%s", run_id, exc)
+        from fastapi.responses import JSONResponse  # noqa: PLC0415
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(exc), "run_id": run_id},
+        )
+
+    rows = [lead.model_dump(mode="json") for lead in leads]
+    logger.info("Seller leads run completed run_id=%s leads=%s", run_id, len(leads))
+    return {
+        "run_id": run_id,
+        "leads": rows,
+        "csv": seller_leads_to_csv_text(leads),
+        "summary": {
+            "total": len(leads),
+            "enriched": sum(1 for lead in leads if lead.diagnosis is not None),
+        },
+    }
+
+
+@app.get("/api/seller-leads/history")
+def seller_leads_history(limit: int = 100) -> dict[str, Any]:
+    """Return the last N rows from seller_leads.csv."""
+    rows = read_seller_leads_csv(SELLER_LEADS_CSV, limit=limit)
+    return {"rows": rows, "total": len(rows)}
 
 
 @app.post("/api/export/google-sheets")
