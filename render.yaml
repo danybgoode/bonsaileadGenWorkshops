@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: leadseek
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.0-flash
+      - key: SERPAPI_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: MIYAGISANCHEZ_URL
+        value: https://miyagisanchez.com
+      - key: HUBSPOT_API_KEY
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.11"
